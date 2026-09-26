@@ -3,13 +3,13 @@ mod scenario;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, State},
-    http::{StatusCode, header},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
+    http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use scenario::{ScenarioError, ScenarioInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,14 +24,32 @@ struct ErrorResponse {
     error: String,
 }
 
-#[derive(Clone)]
-struct AppState {
-    parser_slots: Arc<Semaphore>,
+#[derive(Serialize)]
+struct UploadScenarioResponse {
+    id: uuid::Uuid,
 }
 
 struct ScenarioUpload {
     file_name: String,
     bytes: axum::body::Bytes,
+}
+
+#[derive(Serialize)]
+struct StoredScenario<'a> {
+    id: uuid::Uuid,
+    original_filename: &'a str,
+    scenario: &'a ScenarioInfo,
+}
+
+#[derive(Deserialize)]
+struct StoredScenarioMetadata {
+    original_filename: String,
+}
+
+#[derive(Clone)]
+struct AppState {
+    parser_slots: Arc<Semaphore>,
+    scenario_data_dir: Arc<std::path::PathBuf>,
 }
 
 async fn index() -> Html<&'static str> {
@@ -226,42 +244,15 @@ async fn read_scenario_upload(multipart: &mut Multipart) -> Result<ScenarioUploa
     }
 }
 
-async fn receive_scenario(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<Json<ScenarioInfo>, ApiError> {
-    let upload = read_scenario_upload(&mut multipart).await?;
-    tracing::debug!(
-                    filename = ?upload.file_name,
-                    size = upload.bytes.len(),
-    "Scenario upload received"
-                );
-
-    let temp_file = store_scenario_tempfile(upload.bytes.as_ref())?;
-
-    let scenario = parse_scenario_with_slot(&state, temp_file.path()).await?;
-    tracing::info!(
-        width = scenario.width,
-        height = scenario.height,
-        size = scenario.terrain.len(),
-        "Scenario parsed"
-    );
-
-    Ok(Json(scenario))
-}
-
-fn render_minimap_png(scenario: &ScenarioInfo) -> Result<Vec<u8>, ApiError> {
-    let minimap = minimap::render_isometric_minimap(scenario);
-
-    let image = image::DynamicImage::ImageRgb8(minimap);
+fn encode_png(image: image::DynamicImage) -> Result<Vec<u8>, ApiError> {
     let mut buffer = std::io::Cursor::new(Vec::new());
 
     match image.write_to(&mut buffer, image::ImageFormat::Png) {
         Ok(()) => {}
         Err(error) => {
             tracing::error!(
-                        error = %error,
-                        "image.write_to failed"
+                error = %error,
+                "image.write_to failed"
             );
 
             return Err(error_response(
@@ -274,24 +265,288 @@ fn render_minimap_png(scenario: &ScenarioInfo) -> Result<Vec<u8>, ApiError> {
     Ok(buffer.into_inner())
 }
 
-async fn receive_scenario_minimap(
+fn storage_error(error: std::io::Error, id: uuid::Uuid) -> ApiError {
+    tracing::error!(
+        error = %error,
+        scenario_id = %id,
+        "Unable to store scenario"
+    );
+
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Unable to store the scenario",
+    )
+}
+
+async fn upload_scenario(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Response, ApiError> {
+) -> Result<Json<UploadScenarioResponse>, ApiError> {
     let upload = read_scenario_upload(&mut multipart).await?;
-    tracing::debug!(
-                    filename = ?upload.file_name,
-                    size = upload.bytes.len(),
-    "Scenario upload received"
-                );
 
     let temp_file = store_scenario_tempfile(upload.bytes.as_ref())?;
 
     let scenario = parse_scenario_with_slot(&state, temp_file.path()).await?;
 
-    let png_bytes = render_minimap_png(&scenario)?;
+    let layers = minimap::render_isometric_minimap_layers(&scenario);
+    let terrain_png = encode_png(image::DynamicImage::ImageRgb8(layers.terrain))?;
 
-    Ok(([(header::CONTENT_TYPE, "image/png")], png_bytes).into_response())
+    let gaia_png = encode_png(image::DynamicImage::ImageRgba8(layers.gaia))?;
+
+    let players_png = encode_png(image::DynamicImage::ImageRgba8(layers.players))?;
+
+    let id = uuid::Uuid::new_v4();
+
+    let scenario_dir = state.scenario_data_dir.join(id.to_string());
+
+    let staging_dir = state.scenario_data_dir.join(format!(".tmp-{id}"));
+
+    let staging_minimap_dir = staging_dir.join("minimap");
+
+    let metadata = StoredScenario {
+        id,
+        original_filename: &upload.file_name,
+        scenario: &scenario,
+    };
+    let metadata_bytes = serde_json::to_vec_pretty(&metadata).map_err(|error| {
+        tracing::error!(
+            error = %error,
+            scenario_id = %id,
+            "Unable to serialize scenario metadata"
+        );
+
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        )
+    })?;
+
+    let persist_result: Result<(), ApiError> = async {
+        tokio::fs::create_dir_all(&staging_minimap_dir)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        tokio::fs::write(staging_dir.join("original.aoe2scenario"), &upload.bytes)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        tokio::fs::write(staging_dir.join("metadata.json"), metadata_bytes)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        tokio::fs::write(staging_minimap_dir.join("terrain.png"), terrain_png)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        tokio::fs::write(staging_minimap_dir.join("gaia.png"), gaia_png)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        tokio::fs::write(staging_minimap_dir.join("players.png"), players_png)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        tokio::fs::rename(&staging_dir, &scenario_dir)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = persist_result {
+        match tokio::fs::remove_dir_all(&staging_dir).await {
+            Ok(()) => {}
+
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {}
+
+            Err(cleanup_error) => {
+                tracing::error!(
+                    error = %cleanup_error,
+                    scenario_id = %id,
+                    "Unable to clean scenario staging directory"
+                );
+            }
+        }
+
+        return Err(error);
+    }
+
+    Ok(Json(UploadScenarioResponse { id }))
+}
+
+async fn delete_scenario(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let scenario_dir = state.scenario_data_dir.join(id.to_string());
+
+    match tokio::fs::remove_dir_all(&scenario_dir).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"))
+        }
+
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to delete scenario"
+            );
+
+            Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ))
+        }
+    }
+}
+
+async fn download_scenario(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Response, ApiError> {
+    let scenario_dir = state.scenario_data_dir.join(id.to_string());
+
+    let metadata_bytes = tokio::fs::read(scenario_dir.join("metadata.json"))
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                error_response(StatusCode::NOT_FOUND, "Scenario not found")
+            } else {
+                storage_error(error, id)
+            }
+        })?;
+
+    let metadata: StoredScenarioMetadata =
+        serde_json::from_slice(&metadata_bytes).map_err(|error| {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to deserialize scenario metadata"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to read the scenario",
+            )
+        })?;
+
+    let scenario_bytes = tokio::fs::read(scenario_dir.join("original.aoe2scenario"))
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    let safe_filename: String = metadata
+        .original_filename
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let content_disposition = format!("attachment; filename=\"{safe_filename}\"");
+
+    let mut response = scenario_bytes.into_response();
+
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition).map_err(|error| {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to create download filename header"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to download the scenario",
+            )
+        })?,
+    );
+
+    Ok(response)
+}
+
+async fn get_scenario(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Response, ApiError> {
+    let metadata_path = state
+        .scenario_data_dir
+        .join(id.to_string())
+        .join("metadata.json");
+
+    let metadata = tokio::fs::read(metadata_path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            error_response(StatusCode::NOT_FOUND, "Scenario not found")
+        } else {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to read scenario metadata"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to read the scenario",
+            )
+        }
+    })?;
+
+    Ok(([(header::CONTENT_TYPE, "application/json")], metadata).into_response())
+}
+
+async fn get_minimap_layer(
+    State(state): State<AppState>,
+    Path((id, layer)): Path<(uuid::Uuid, String)>,
+) -> Result<Response, ApiError> {
+    let file_name = match layer.as_str() {
+        "terrain" => "terrain.png",
+        "gaia" => "gaia.png",
+        "players" => "players.png",
+        _ => {
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "Minimap layer not found",
+            ));
+        }
+    };
+
+    let path = state
+        .scenario_data_dir
+        .join(id.to_string())
+        .join("minimap")
+        .join(file_name);
+
+    let bytes = tokio::fs::read(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            error_response(StatusCode::NOT_FOUND, "Minimap layer not found")
+        } else {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                layer = %layer,
+                "Unable to read minimap layer"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to read minimap layer",
+            )
+        }
+    })?;
+
+    Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
 }
 
 #[tokio::main]
@@ -300,22 +555,27 @@ async fn main() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    let scenario_data_dir =
+        std::env::var("SCENARIO_DATA_DIR").unwrap_or_else(|_| "data/scenarios".to_string());
     let state = AppState {
         parser_slots: Arc::new(Semaphore::new(1)),
+        scenario_data_dir: Arc::new(scenario_data_dir.into()),
     };
+
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .route(
             "/api/scenario",
-            post(receive_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+            post(upload_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route(
-            "/api/scenario/minimap",
-            post(receive_scenario_minimap).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+            "/api/scenario/{id}",
+            get(get_scenario).delete(delete_scenario),
         )
+        .route("/api/scenario/{id}/download", get(download_scenario))
+        .route("/api/scenario/{id}/minimap/{layer}", get(get_minimap_layer))
         .with_state(state);
-
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
 
     axum::serve(listener, app).await.unwrap();

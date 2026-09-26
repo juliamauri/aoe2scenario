@@ -3,32 +3,87 @@
 <head>
     <meta charset="utf-8">
     <title>Aoe2Scenario</title>
+    <style>
+        #minimap-stack {
+            position: relative;
+            display: inline-block;
+        }
+
+        #minimap-stack img {
+            display: block;
+            image-rendering: pixelated;
+        }
+
+        #minimap-stack .minimap-overlay {
+            position: absolute;
+            inset: 0;
+        }
+    </style>
 </head>
 <body>
 <h1>Aoe2Scenario</h1>
 <input type="file" id="scenario-file" accept=".aoe2scenario">
-<button id="parse-button">Parse scenario</button>
-<button id="minimap-button">Render minimap</button>
+<button id="upload-button">Upload scenario</button>
 
 <p id="error-message" hidden></p>
+
 <div id="scenario-result" hidden>
+    <p>File: <span id="scenario-filename"></span></p>
     <p>Width: <span id="scenario-width"></span></p>
     <p>Height: <span id="scenario-height"></span></p>
-</div>
 
-<h2>Minimap</h2>
-<img id="minimap-image" hidden alt="Scenario minimap">
+    <a id="download-link">Download original scenario</a>
+    <button id="delete-button">Delete scenario</button>
+
+    <h2>Minimap</h2>
+
+    <div id="layer-controls">
+        <label>
+            <input type="checkbox" id="terrain-toggle" checked>
+            Terrain
+        </label>
+
+        <label>
+            <input type="checkbox" id="gaia-toggle" checked>
+            Gaia
+        </label>
+
+        <label>
+            <input type="checkbox" id="players-toggle" checked>
+            Players
+        </label>
+    </div>
+
+    <div id="minimap-stack">
+        <img id="terrain-layer" alt="Terrain">
+        <img id="gaia-layer" class="minimap-overlay" alt="Gaia">
+        <img id="players-layer" class="minimap-overlay" alt="Players">
+    </div>
+</div>
 
 <script>
     const fileInput = document.getElementById("scenario-file");
-    const parseButton = document.getElementById("parse-button");
-    const minimapButton = document.getElementById("minimap-button");
+    const uploadButton = document.getElementById("upload-button");
+
     const errorMessage = document.getElementById("error-message");
     const scenarioResult = document.getElementById("scenario-result");
+
+    const scenarioFilename = document.getElementById("scenario-filename");
     const scenarioWidth = document.getElementById("scenario-width");
     const scenarioHeight = document.getElementById("scenario-height");
-    const minimapImage = document.getElementById("minimap-image");
 
+    const terrainLayer = document.getElementById("terrain-layer");
+    const gaiaLayer = document.getElementById("gaia-layer");
+    const playersLayer = document.getElementById("players-layer");
+
+    const terrainToggle = document.getElementById("terrain-toggle");
+    const gaiaToggle = document.getElementById("gaia-toggle");
+    const playersToggle = document.getElementById("players-toggle");
+
+    const downloadLink = document.getElementById("download-link");
+    const deleteButton = document.getElementById("delete-button");
+
+    let currentScenarioId = null;
 
     function scenarioFormData(file) {
         const formData = new FormData();
@@ -36,25 +91,7 @@
         return formData;
     }
 
-    function clearMinimap() {
-        if (currentMinimapUrl) {
-            URL.revokeObjectURL(currentMinimapUrl);
-            currentMinimapUrl = null;
-        }
-
-        minimapImage.removeAttribute("src");
-        minimapImage.hidden = true;
-    }
-
-    fileInput.addEventListener("change", () => {
-        clearMinimap();
-        scenarioResult.hidden = true;
-        errorMessage.hidden = true;
-    });
-
-    window.addEventListener("beforeunload", clearMinimap);
-
-    parseButton.addEventListener("click", async () => {
+    uploadButton.addEventListener("click", async () => {
         errorMessage.hidden = true;
         scenarioResult.hidden = true;
 
@@ -67,75 +104,108 @@
         }
 
         try {
-            const response = await fetch("/api/scenario", {
+            const uploadResponse = await fetch("/api/scenario", {
                 method: "POST",
                 body: scenarioFormData(file)
             });
 
-            const data = await response.json();
+            const uploadData = await uploadResponse.json();
 
-            if (!response.ok) {
+            if (!uploadResponse.ok) {
+                errorMessage.textContent = uploadData.error;
+                errorMessage.hidden = false;
+                return;
+            }
+
+            currentScenarioId = uploadData.id;
+
+            const scenarioResponse =
+                await fetch(`/api/scenario/${currentScenarioId}`);
+
+            const data = await scenarioResponse.json();
+
+            if (!scenarioResponse.ok) {
                 errorMessage.textContent = data.error;
                 errorMessage.hidden = false;
                 return;
             }
 
-            scenarioWidth.textContent = data.width;
-            scenarioHeight.textContent = data.height;
+            scenarioFilename.textContent = data.original_filename;
+            scenarioWidth.textContent = data.scenario.width;
+            scenarioHeight.textContent = data.scenario.height;
+
+            terrainLayer.src =
+                `/api/scenario/${currentScenarioId}/minimap/terrain`;
+
+            gaiaLayer.src =
+                `/api/scenario/${currentScenarioId}/minimap/gaia`;
+
+            playersLayer.src =
+                `/api/scenario/${currentScenarioId}/minimap/players`;
+
+            downloadLink.href =
+                `/api/scenario/${currentScenarioId}/download`;
+
             scenarioResult.hidden = false;
         } catch (error) {
             console.error(error);
 
-            errorMessage.textContent = "Unable to process the server response.";
+            errorMessage.textContent =
+                "Unable to process the scenario.";
+
             errorMessage.hidden = false;
         }
-
     });
 
-    let currentMinimapUrl = null;
+    terrainToggle.addEventListener("change", () => {
+        terrainLayer.style.opacity =
+            terrainToggle.checked ? "1" : "0";
+    });
 
-    minimapButton.addEventListener("click", async () => {
-        errorMessage.hidden = true;
-        minimapImage.hidden = true;
+    gaiaToggle.addEventListener("change", () => {
+        gaiaLayer.style.opacity =
+            gaiaToggle.checked ? "1" : "0";
+    });
 
-        const file = fileInput.files[0];
+    playersToggle.addEventListener("change", () => {
+        playersLayer.style.opacity =
+            playersToggle.checked ? "1" : "0";
+    });
 
-        if (!file) {
-            errorMessage.textContent = "Please select a scenario file.";
-            errorMessage.hidden = false;
+    deleteButton.addEventListener("click", async () => {
+        if (!currentScenarioId) {
             return;
         }
 
         try {
-            const minimapResponse = await fetch("/api/scenario/minimap", {
-                method: "POST",
-                body: scenarioFormData(file)
-            });
-
-            if (!minimapResponse.ok) {
-                let data;
-
-                try {
-                    data = await minimapResponse.json();
-                    errorMessage.textContent = data.error;
-                } catch {
-                    errorMessage.textContent = "Unable to render minimap.";
+            const response = await fetch(
+                `/api/scenario/${currentScenarioId}`,
+                {
+                    method: "DELETE"
                 }
+            );
 
+            if (!response.ok) {
+                const data = await response.json();
+
+                errorMessage.textContent = data.error;
                 errorMessage.hidden = false;
                 return;
             }
 
-            const minimapBlob = await minimapResponse.blob();
+            currentScenarioId = null;
 
-            clearMinimap();
+            terrainLayer.removeAttribute("src");
+            gaiaLayer.removeAttribute("src");
+            playersLayer.removeAttribute("src");
 
-            currentMinimapUrl = URL.createObjectURL(minimapBlob);
-            minimapImage.src = currentMinimapUrl;
-            minimapImage.hidden = false;
+            scenarioResult.hidden = true;
         } catch (error) {
             console.error(error);
-            errorMessage.textContent = "Unable to load minimap.";
+
+            errorMessage.textContent =
+                "Unable to delete the scenario.";
+
             errorMessage.hidden = false;
         }
     });
