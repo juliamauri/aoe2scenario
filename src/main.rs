@@ -4,12 +4,12 @@ mod scenario;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::StatusCode,
-    response::Html,
+    http::{HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
 use scenario::{ScenarioError, ScenarioInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +39,11 @@ struct StoredScenario<'a> {
     id: uuid::Uuid,
     original_filename: &'a str,
     scenario: &'a ScenarioInfo,
+}
+
+#[derive(Deserialize)]
+struct StoredScenarioMetadata {
+    original_filename: String,
 }
 
 #[derive(Clone)]
@@ -331,29 +336,56 @@ async fn upload_scenario(
         )
     })?;
 
-    tokio::fs::write(staging_dir.join("original.aoe2scenario"), &upload.bytes)
-        .await
-        .map_err(|error| storage_error(error, id))?;
+    let persist_result: Result<(), ApiError> = async {
+        tokio::fs::create_dir_all(&staging_minimap_dir)
+            .await
+            .map_err(|error| storage_error(error, id))?;
 
-    tokio::fs::write(staging_dir.join("metadata.json"), metadata_bytes)
-        .await
-        .map_err(|error| storage_error(error, id))?;
+        tokio::fs::write(staging_dir.join("original.aoe2scenario"), &upload.bytes)
+            .await
+            .map_err(|error| storage_error(error, id))?;
 
-    tokio::fs::write(staging_minimap_dir.join("terrain.png"), terrain_png)
-        .await
-        .map_err(|error| storage_error(error, id))?;
+        tokio::fs::write(staging_dir.join("metadata.json"), metadata_bytes)
+            .await
+            .map_err(|error| storage_error(error, id))?;
 
-    tokio::fs::write(staging_minimap_dir.join("gaia.png"), gaia_png)
-        .await
-        .map_err(|error| storage_error(error, id))?;
+        tokio::fs::write(staging_minimap_dir.join("terrain.png"), terrain_png)
+            .await
+            .map_err(|error| storage_error(error, id))?;
 
-    tokio::fs::write(staging_minimap_dir.join("players.png"), players_png)
-        .await
-        .map_err(|error| storage_error(error, id))?;
+        tokio::fs::write(staging_minimap_dir.join("gaia.png"), gaia_png)
+            .await
+            .map_err(|error| storage_error(error, id))?;
 
-    tokio::fs::rename(&staging_dir, &scenario_dir)
-        .await
-        .map_err(|error| storage_error(error, id))?;
+        tokio::fs::write(staging_minimap_dir.join("players.png"), players_png)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        tokio::fs::rename(&staging_dir, &scenario_dir)
+            .await
+            .map_err(|error| storage_error(error, id))?;
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = persist_result {
+        match tokio::fs::remove_dir_all(&staging_dir).await {
+            Ok(()) => {}
+
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {}
+
+            Err(cleanup_error) => {
+                tracing::error!(
+                    error = %cleanup_error,
+                    scenario_id = %id,
+                    "Unable to clean scenario staging directory"
+                );
+            }
+        }
+
+        return Err(error);
+    }
 
     Ok(Json(UploadScenarioResponse { id }))
 }
@@ -386,6 +418,80 @@ async fn delete_scenario(
     }
 }
 
+async fn download_scenario(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Response, ApiError> {
+    let scenario_dir = state.scenario_data_dir.join(id.to_string());
+
+    let metadata_bytes = tokio::fs::read(scenario_dir.join("metadata.json"))
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                error_response(StatusCode::NOT_FOUND, "Scenario not found")
+            } else {
+                storage_error(error, id)
+            }
+        })?;
+
+    let metadata: StoredScenarioMetadata =
+        serde_json::from_slice(&metadata_bytes).map_err(|error| {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to deserialize scenario metadata"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to read the scenario",
+            )
+        })?;
+
+    let scenario_bytes = tokio::fs::read(scenario_dir.join("original.aoe2scenario"))
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    let safe_filename: String = metadata
+        .original_filename
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ' ') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let content_disposition = format!("attachment; filename=\"{safe_filename}\"");
+
+    let mut response = scenario_bytes.into_response();
+
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition).map_err(|error| {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to create download filename header"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to download the scenario",
+            )
+        })?,
+    );
+
+    Ok(response)
+}
+
 #[tokio::main]
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -407,6 +513,7 @@ async fn main() {
             post(upload_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .route("/api/scenario/{id}", delete(delete_scenario))
+        .route("/api/scenario/{id}/download", get(download_scenario))
         .with_state(state);
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
 
