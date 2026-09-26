@@ -492,6 +492,35 @@ async fn download_scenario(
     Ok(response)
 }
 
+async fn get_scenario(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Response, ApiError> {
+    let metadata_path = state
+        .scenario_data_dir
+        .join(id.to_string())
+        .join("metadata.json");
+
+    let metadata = tokio::fs::read(metadata_path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            error_response(StatusCode::NOT_FOUND, "Scenario not found")
+        } else {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to read scenario metadata"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to read the scenario",
+            )
+        }
+    })?;
+
+    Ok(([(header::CONTENT_TYPE, "application/json")], metadata).into_response())
+}
+
 #[tokio::main]
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -512,7 +541,10 @@ async fn main() {
             "/api/scenario",
             post(upload_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
-        .route("/api/scenario/{id}", delete(delete_scenario))
+        .route(
+            "/api/scenario/{id}",
+            get(get_scenario).delete(delete_scenario),
+        )
         .route("/api/scenario/{id}/download", get(download_scenario))
         .with_state(state);
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
