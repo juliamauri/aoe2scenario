@@ -6,7 +6,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{get, post},
 };
 use scenario::{ScenarioError, ScenarioInfo};
 use serde::{Deserialize, Serialize};
@@ -303,21 +303,6 @@ async fn upload_scenario(
 
     let staging_minimap_dir = staging_dir.join("minimap");
 
-    tokio::fs::create_dir_all(&staging_minimap_dir)
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                error = %error,
-                scenario_id = %id,
-                "Unable to create scenario staging directory"
-            );
-
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to store the scenario",
-            )
-        })?;
-
     let metadata = StoredScenario {
         id,
         original_filename: &upload.file_name,
@@ -521,6 +506,49 @@ async fn get_scenario(
     Ok(([(header::CONTENT_TYPE, "application/json")], metadata).into_response())
 }
 
+async fn get_minimap_layer(
+    State(state): State<AppState>,
+    Path((id, layer)): Path<(uuid::Uuid, String)>,
+) -> Result<Response, ApiError> {
+    let file_name = match layer.as_str() {
+        "terrain" => "terrain.png",
+        "gaia" => "gaia.png",
+        "players" => "players.png",
+        _ => {
+            return Err(error_response(
+                StatusCode::NOT_FOUND,
+                "Minimap layer not found",
+            ));
+        }
+    };
+
+    let path = state
+        .scenario_data_dir
+        .join(id.to_string())
+        .join("minimap")
+        .join(file_name);
+
+    let bytes = tokio::fs::read(path).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            error_response(StatusCode::NOT_FOUND, "Minimap layer not found")
+        } else {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                layer = %layer,
+                "Unable to read minimap layer"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to read minimap layer",
+            )
+        }
+    })?;
+
+    Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
+}
+
 #[tokio::main]
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -546,6 +574,7 @@ async fn main() {
             get(get_scenario).delete(delete_scenario),
         )
         .route("/api/scenario/{id}/download", get(download_scenario))
+        .route("/api/scenario/{id}/minimap/{layer}", get(get_minimap_layer))
         .with_state(state);
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
 
