@@ -4,8 +4,8 @@ mod scenario;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, State},
-    http::{StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    http::StatusCode,
+    response::Html,
     routing::{get, post},
 };
 use scenario::{ScenarioError, ScenarioInfo};
@@ -24,14 +24,27 @@ struct ErrorResponse {
     error: String,
 }
 
-#[derive(Clone)]
-struct AppState {
-    parser_slots: Arc<Semaphore>,
+#[derive(Serialize)]
+struct UploadScenarioResponse {
+    id: uuid::Uuid,
 }
 
 struct ScenarioUpload {
     file_name: String,
     bytes: axum::body::Bytes,
+}
+
+#[derive(Serialize)]
+struct StoredScenario<'a> {
+    id: uuid::Uuid,
+    original_filename: &'a str,
+    scenario: &'a ScenarioInfo,
+}
+
+#[derive(Clone)]
+struct AppState {
+    parser_slots: Arc<Semaphore>,
+    scenario_data_dir: Arc<std::path::PathBuf>,
 }
 
 async fn index() -> Html<&'static str> {
@@ -226,42 +239,15 @@ async fn read_scenario_upload(multipart: &mut Multipart) -> Result<ScenarioUploa
     }
 }
 
-async fn receive_scenario(
-    State(state): State<AppState>,
-    mut multipart: Multipart,
-) -> Result<Json<ScenarioInfo>, ApiError> {
-    let upload = read_scenario_upload(&mut multipart).await?;
-    tracing::debug!(
-                    filename = ?upload.file_name,
-                    size = upload.bytes.len(),
-    "Scenario upload received"
-                );
-
-    let temp_file = store_scenario_tempfile(upload.bytes.as_ref())?;
-
-    let scenario = parse_scenario_with_slot(&state, temp_file.path()).await?;
-    tracing::info!(
-        width = scenario.width,
-        height = scenario.height,
-        size = scenario.terrain.len(),
-        "Scenario parsed"
-    );
-
-    Ok(Json(scenario))
-}
-
-fn render_minimap_png(scenario: &ScenarioInfo) -> Result<Vec<u8>, ApiError> {
-    let minimap = minimap::render_isometric_minimap(scenario);
-
-    let image = image::DynamicImage::ImageRgb8(minimap);
+fn encode_png(image: image::DynamicImage) -> Result<Vec<u8>, ApiError> {
     let mut buffer = std::io::Cursor::new(Vec::new());
 
     match image.write_to(&mut buffer, image::ImageFormat::Png) {
         Ok(()) => {}
         Err(error) => {
             tracing::error!(
-                        error = %error,
-                        "image.write_to failed"
+                error = %error,
+                "image.write_to failed"
             );
 
             return Err(error_response(
@@ -274,24 +260,102 @@ fn render_minimap_png(scenario: &ScenarioInfo) -> Result<Vec<u8>, ApiError> {
     Ok(buffer.into_inner())
 }
 
-async fn receive_scenario_minimap(
+fn storage_error(error: std::io::Error, id: uuid::Uuid) -> ApiError {
+    tracing::error!(
+        error = %error,
+        scenario_id = %id,
+        "Unable to store scenario"
+    );
+
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Unable to store the scenario",
+    )
+}
+
+async fn upload_scenario(
     State(state): State<AppState>,
     mut multipart: Multipart,
-) -> Result<Response, ApiError> {
+) -> Result<Json<UploadScenarioResponse>, ApiError> {
     let upload = read_scenario_upload(&mut multipart).await?;
-    tracing::debug!(
-                    filename = ?upload.file_name,
-                    size = upload.bytes.len(),
-    "Scenario upload received"
-                );
 
     let temp_file = store_scenario_tempfile(upload.bytes.as_ref())?;
 
     let scenario = parse_scenario_with_slot(&state, temp_file.path()).await?;
 
-    let png_bytes = render_minimap_png(&scenario)?;
+    let layers = minimap::render_isometric_minimap_layers(&scenario);
+    let terrain_png = encode_png(image::DynamicImage::ImageRgb8(layers.terrain))?;
 
-    Ok(([(header::CONTENT_TYPE, "image/png")], png_bytes).into_response())
+    let gaia_png = encode_png(image::DynamicImage::ImageRgba8(layers.gaia))?;
+
+    let players_png = encode_png(image::DynamicImage::ImageRgba8(layers.players))?;
+
+    let id = uuid::Uuid::new_v4();
+
+    let scenario_dir = state.scenario_data_dir.join(id.to_string());
+
+    let staging_dir = state.scenario_data_dir.join(format!(".tmp-{id}"));
+
+    let staging_minimap_dir = staging_dir.join("minimap");
+
+    tokio::fs::create_dir_all(&staging_minimap_dir)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to create scenario staging directory"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to store the scenario",
+            )
+        })?;
+
+    let metadata = StoredScenario {
+        id,
+        original_filename: &upload.file_name,
+        scenario: &scenario,
+    };
+    let metadata_bytes = serde_json::to_vec_pretty(&metadata).map_err(|error| {
+        tracing::error!(
+            error = %error,
+            scenario_id = %id,
+            "Unable to serialize scenario metadata"
+        );
+
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        )
+    })?;
+
+    tokio::fs::write(staging_dir.join("original.aoe2scenario"), &upload.bytes)
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    tokio::fs::write(staging_dir.join("metadata.json"), metadata_bytes)
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    tokio::fs::write(staging_minimap_dir.join("terrain.png"), terrain_png)
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    tokio::fs::write(staging_minimap_dir.join("gaia.png"), gaia_png)
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    tokio::fs::write(staging_minimap_dir.join("players.png"), players_png)
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    tokio::fs::rename(&staging_dir, &scenario_dir)
+        .await
+        .map_err(|error| storage_error(error, id))?;
+
+    Ok(Json(UploadScenarioResponse { id }))
 }
 
 #[tokio::main]
@@ -300,22 +364,21 @@ async fn main() {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    let scenario_data_dir =
+        std::env::var("SCENARIO_DATA_DIR").unwrap_or_else(|_| "data/scenarios".to_string());
     let state = AppState {
         parser_slots: Arc::new(Semaphore::new(1)),
+        scenario_data_dir: Arc::new(scenario_data_dir.into()),
     };
+
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .route(
             "/api/scenario",
-            post(receive_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
-        )
-        .route(
-            "/api/scenario/minimap",
-            post(receive_scenario_minimap).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+            post(upload_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
         .with_state(state);
-
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
 
     axum::serve(listener, app).await.unwrap();

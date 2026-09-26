@@ -5,6 +5,12 @@ const TILE_WIDTH: u32 = 8;
 const TILE_HEIGHT: u32 = 4;
 const PADDING: u32 = 4;
 
+pub(crate) struct MinimapLayers {
+    pub(crate) terrain: RgbImage,
+    pub(crate) gaia: RgbaImage,
+    pub(crate) players: RgbaImage,
+}
+
 #[derive(Clone, Copy)]
 struct TerrainPalette {
     up: [u8; 3],
@@ -326,22 +332,10 @@ fn render_player_layer(scenario: &ScenarioInfo) -> RgbaImage {
     image
 }
 
-fn compose_layer(image: &mut RgbImage, layer: &RgbaImage) {
-    for (x, y, pixel) in layer.enumerate_pixels() {
-        if pixel[3] != 0 {
-            image.put_pixel(x, y, Rgb([pixel[0], pixel[1], pixel[2]]));
-        }
+pub(crate) fn render_isometric_minimap_layers(scenario: &ScenarioInfo) -> MinimapLayers {
+    MinimapLayers {
+        terrain: render_terrain_layer(scenario),
+        gaia: render_gaia_layer(scenario),
+        players: render_player_layer(scenario),
     }
-}
-
-pub(crate) fn render_isometric_minimap(scenario: &ScenarioInfo) -> RgbImage {
-    let mut image = render_terrain_layer(scenario);
-
-    let gaia = render_gaia_layer(scenario);
-    compose_layer(&mut image, &gaia);
-
-    let players = render_player_layer(scenario);
-    compose_layer(&mut image, &players);
-
-    image
 }
