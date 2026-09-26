@@ -3,10 +3,10 @@ mod scenario;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::StatusCode,
     response::Html,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use scenario::{ScenarioError, ScenarioInfo};
 use serde::Serialize;
@@ -358,6 +358,34 @@ async fn upload_scenario(
     Ok(Json(UploadScenarioResponse { id }))
 }
 
+async fn delete_scenario(
+    State(state): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let scenario_dir = state.scenario_data_dir.join(id.to_string());
+
+    match tokio::fs::remove_dir_all(&scenario_dir).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"))
+        }
+
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to delete scenario"
+            );
+
+            Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ))
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -378,6 +406,7 @@ async fn main() {
             "/api/scenario",
             post(upload_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
+        .route("/api/scenario/{id}", delete(delete_scenario))
         .with_state(state);
     let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
 
