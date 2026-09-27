@@ -46,6 +46,18 @@ struct StoredScenarioMetadata {
     original_filename: String,
 }
 
+#[derive(Deserialize)]
+struct StoredScenarioListMetadata {
+    id: uuid::Uuid,
+    original_filename: String,
+}
+
+#[derive(Serialize)]
+struct ScenarioListItem {
+    id: uuid::Uuid,
+    original_filename: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     parser_slots: Arc<Semaphore>,
@@ -549,6 +561,98 @@ async fn get_minimap_layer(
     Ok(([(header::CONTENT_TYPE, "image/png")], bytes).into_response())
 }
 
+async fn list_scenarios(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ScenarioListItem>>, ApiError> {
+    let mut entries = tokio::fs::read_dir(state.scenario_data_dir.as_ref())
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                error = %error,
+                "Unable to read scenario directory"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
+
+    let mut scenarios = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|error| {
+        tracing::error!(
+            error = %error,
+            "Unable to read scenario directory entry"
+        );
+
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to list scenarios",
+        )
+    })? {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+
+        let id = match uuid::Uuid::parse_str(&file_name) {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+
+        let metadata_bytes = tokio::fs::read(entry.path().join("metadata.json"))
+            .await
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    error_response(StatusCode::NOT_FOUND, "Scenario not found")
+                } else {
+                    tracing::error!(
+                        error = %error,
+                        scenario_id = %id,
+                        "Unable to read scenario metadata"
+                    );
+
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Unable to read the scenario",
+                    )
+                }
+            })?;
+
+        let metadata: StoredScenarioListMetadata = serde_json::from_slice(&metadata_bytes)
+            .map_err(|error| {
+                tracing::error!(
+                    error = %error,
+                    scenario_id = %id,
+                    "Unable to deserialize scenario metadata"
+                );
+
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Unable to list scenarios",
+                )
+            })?;
+
+        if metadata.id != id {
+            tracing::error!(
+                directory_id = %id,
+                metadata_id = %metadata.id,
+                "Scenario metadata ID does not match directory"
+            );
+
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            ));
+        }
+
+        scenarios.push(ScenarioListItem {
+            id,
+            original_filename: metadata.original_filename,
+        });
+    }
+
+    Ok(Json(scenarios))
+}
+
 #[tokio::main]
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -569,6 +673,7 @@ async fn main() {
             "/api/scenario",
             post(upload_scenario).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
         )
+        .route("/api/scenarios", get(list_scenarios))
         .route(
             "/api/scenario/{id}",
             get(get_scenario).delete(delete_scenario),
