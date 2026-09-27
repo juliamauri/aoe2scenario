@@ -25,6 +25,9 @@
 <input type="file" id="scenario-file" accept=".aoe2scenario">
 <button id="upload-button">Upload scenario</button>
 
+<h2>Saved scenarios</h2>
+<div id="scenario-list"></div>
+
 <p id="error-message" hidden></p>
 
 <div id="scenario-result" hidden>
@@ -67,6 +70,7 @@
 <script>
     const fileInput = document.getElementById("scenario-file");
     const uploadButton = document.getElementById("upload-button");
+    const scenarioList = document.getElementById("scenario-list");
 
     const errorMessage = document.getElementById("error-message");
     const scenarioResult = document.getElementById("scenario-result");
@@ -124,36 +128,8 @@
 
             currentScenarioId = uploadData.id;
 
-            const scenarioResponse =
-                await fetch(`/api/scenario/${currentScenarioId}`);
-
-            const data = await scenarioResponse.json();
-
-            if (!scenarioResponse.ok) {
-                errorMessage.textContent = data.error;
-                errorMessage.hidden = false;
-                return;
-            }
-
-            scenarioFilename.textContent = data.original_filename;
-            scenarioWidth.textContent = data.scenario.width;
-            scenarioHeight.textContent = data.scenario.height;
-
-            renderPlayers(data.scenario.players);
-
-            terrainLayer.src =
-                `/api/scenario/${currentScenarioId}/minimap/terrain`;
-
-            gaiaLayer.src =
-                `/api/scenario/${currentScenarioId}/minimap/gaia`;
-
-            playersLayer.src =
-                `/api/scenario/${currentScenarioId}/minimap/players`;
-
-            downloadLink.href =
-                `/api/scenario/${currentScenarioId}/download`;
-
-            scenarioResult.hidden = false;
+            await loadScenario(uploadData.id);
+            await loadScenarios();
         } catch (error) {
             console.error(error);
 
@@ -209,6 +185,7 @@
             scenarioPlayers.replaceChildren();
 
             scenarioResult.hidden = true;
+            await loadScenarios();
         } catch (error) {
             console.error(error);
 
@@ -218,6 +195,75 @@
             errorMessage.hidden = false;
         }
     });
+
+    async function loadScenarios() {
+        scenarioList.replaceChildren();
+
+        const response = await fetch("/api/scenarios");
+        const scenarios = await response.json();
+
+        if (!response.ok) {
+            errorMessage.textContent =
+                scenarios.error ?? "Unable to list scenarios.";
+            errorMessage.hidden = false;
+            return;
+        }
+
+        for (const scenario of scenarios) {
+            const item = document.createElement("div");
+
+            const name = document.createElement("span");
+            name.textContent = scenario.original_filename;
+
+            const loadButton = document.createElement("button");
+            loadButton.textContent = "Load";
+
+            loadButton.addEventListener("click", async () => {
+                await loadScenario(scenario.id);
+            });
+
+            item.appendChild(name);
+            item.appendChild(loadButton);
+
+            scenarioList.appendChild(item);
+        }
+    }
+
+    async function loadScenario(id) {
+        errorMessage.hidden = true;
+
+        const response = await fetch(`/api/scenario/${id}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            errorMessage.textContent =
+                data.error ?? "Unable to load scenario.";
+            errorMessage.hidden = false;
+            return;
+        }
+
+        currentScenarioId = id;
+
+        scenarioFilename.textContent = data.original_filename;
+        scenarioWidth.textContent = data.scenario.width;
+        scenarioHeight.textContent = data.scenario.height;
+
+        renderPlayers(data.scenario.players);
+
+        terrainLayer.src =
+            `/api/scenario/${id}/minimap/terrain`;
+
+        gaiaLayer.src =
+            `/api/scenario/${id}/minimap/gaia`;
+
+        playersLayer.src =
+            `/api/scenario/${id}/minimap/players`;
+
+        downloadLink.href =
+            `/api/scenario/${id}/download`;
+
+        scenarioResult.hidden = false;
+    }
 
     function renderPlayers(players) {
         scenarioPlayers.replaceChildren();
@@ -267,6 +313,8 @@
             scenarioPlayers.appendChild(playerElement);
         }
     }
+
+    loadScenarios();
 </script>
 </body>
 </html>
