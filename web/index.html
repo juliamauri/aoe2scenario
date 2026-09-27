@@ -59,6 +59,9 @@
         <img id="gaia-layer" class="minimap-overlay" alt="Gaia">
         <img id="players-layer" class="minimap-overlay" alt="Players">
     </div>
+
+    <h2>Players</h2>
+    <div id="scenario-players"></div>
 </div>
 
 <script>
@@ -82,6 +85,8 @@
 
     const downloadLink = document.getElementById("download-link");
     const deleteButton = document.getElementById("delete-button");
+
+    const scenarioPlayers = document.getElementById("scenario-players");
 
     let currentScenarioId = null;
 
@@ -133,6 +138,8 @@
             scenarioFilename.textContent = data.original_filename;
             scenarioWidth.textContent = data.scenario.width;
             scenarioHeight.textContent = data.scenario.height;
+
+            renderPlayers(data.scenario.players);
 
             terrainLayer.src =
                 `/api/scenario/${currentScenarioId}/minimap/terrain`;
@@ -199,6 +206,8 @@
             gaiaLayer.removeAttribute("src");
             playersLayer.removeAttribute("src");
 
+            scenarioPlayers.replaceChildren();
+
             scenarioResult.hidden = true;
         } catch (error) {
             console.error(error);
@@ -209,6 +218,55 @@
             errorMessage.hidden = false;
         }
     });
+
+    function renderPlayers(players) {
+        scenarioPlayers.replaceChildren();
+
+        for (const player of players) {
+            if (!player.active) {
+                continue;
+            }
+
+            const playerElement = document.createElement("div");
+
+            const name = document.createElement("h3");
+            name.textContent =
+                `Player ${player.id} — ${player.name ?? "Unnamed"}`;
+            playerElement.appendChild(name);
+
+            const civilization = document.createElement("p");
+            civilization.textContent =
+                `Civilization: ${player.civilization}`;
+            playerElement.appendChild(civilization);
+
+            const populationCap = document.createElement("p");
+            populationCap.textContent =
+                `Population Cap: ${player.population_cap ?? "Unknown"}`;
+            playerElement.appendChild(populationCap);
+
+            const human = document.createElement("p");
+            human.textContent =
+                `Type: ${player.human ? "Human" : "AI"}`;
+            playerElement.appendChild(human);
+
+            const color = document.createElement("p");
+            color.textContent =
+                `Color: ${player.color}`;
+            playerElement.appendChild(color);
+
+            const startingAge = document.createElement("p");
+            startingAge.textContent =
+                `Starting Age: ${player.starting_age}`;
+            playerElement.appendChild(startingAge);
+
+            const resources = document.createElement("p");
+            resources.textContent =
+                `Resources: ${player.resources.food} food, ${player.resources.wood} wood, ${player.resources.gold} gold, ${player.resources.stone} stone`;
+            playerElement.appendChild(resources);
+
+            scenarioPlayers.appendChild(playerElement);
+        }
+    }
 </script>
 </body>
 </html>
