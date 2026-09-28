@@ -54,6 +54,15 @@ for unit in scenario.unit_manager.get_all_units():
         "y": unit.y,
     })
 
+messages = {
+    "instructions": scenario.message_manager.instructions,
+    "hints": scenario.message_manager.hints,
+    "victory": scenario.message_manager.victory,
+    "loss": scenario.message_manager.loss,
+    "history": scenario.message_manager.history,
+    "scouts": scenario.message_manager.scouts,
+}
+
 result = {
     "scenario_version": scenario.scenario_version,
     "game_version": scenario.game_version,
@@ -63,6 +72,7 @@ result = {
     "elevation": elevation,
     "players": players,
     "units": units,
+    "messages": messages,
 }
 
 print(json.dumps(result))
