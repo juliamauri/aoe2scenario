@@ -77,6 +77,9 @@ pub(crate) struct UnitInfo {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct ScenarioInfo {
+    pub(crate) scenario_version: String,
+    pub(crate) game_version: String,
+
     pub(crate) width: u32,
     pub(crate) height: u32,
 

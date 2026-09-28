@@ -55,6 +55,8 @@ for unit in scenario.unit_manager.get_all_units():
     })
 
 result = {
+    "scenario_version": scenario.scenario_version,
+    "game_version": scenario.game_version,
     "width": width,
     "height": height,
     "terrain": terrain,
