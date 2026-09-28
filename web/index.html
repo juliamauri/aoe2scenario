@@ -18,6 +18,10 @@
             position: absolute;
             inset: 0;
         }
+
+        .scenario-message {
+            white-space: pre-wrap;
+        }
     </style>
 </head>
 <body>
@@ -32,6 +36,11 @@
 
 <div id="scenario-result" hidden>
     <p>File: <span id="scenario-filename"></span></p>
+    <p>Uploaded: <span id="scenario-uploaded-at"></span></p>
+    <p>File size: <span id="scenario-file-size"></span></p>
+    <p>Parser version: <span id="scenario-parser-version"></span></p>
+    <p>Game version: <span id="scenario-game-version"></span></p>
+    <p>Scenario version: <span id="scenario-version"></span></p>
     <p>Width: <span id="scenario-width"></span></p>
     <p>Height: <span id="scenario-height"></span></p>
 
@@ -63,6 +72,9 @@
         <img id="players-layer" class="minimap-overlay" alt="Players">
     </div>
 
+    <h2>Scenario messages</h2>
+    <div id="scenario-messages"></div>
+
     <h2>Players</h2>
     <div id="scenario-players"></div>
 </div>
@@ -76,6 +88,11 @@
     const scenarioResult = document.getElementById("scenario-result");
 
     const scenarioFilename = document.getElementById("scenario-filename");
+    const scenarioUploadedAt = document.getElementById("scenario-uploaded-at");
+    const scenarioFileSize = document.getElementById("scenario-file-size");
+    const scenarioParserVersion = document.getElementById("scenario-parser-version");
+    const scenarioGameVersion = document.getElementById("scenario-game-version");
+    const scenarioVersion = document.getElementById("scenario-version");
     const scenarioWidth = document.getElementById("scenario-width");
     const scenarioHeight = document.getElementById("scenario-height");
 
@@ -89,6 +106,8 @@
 
     const downloadLink = document.getElementById("download-link");
     const deleteButton = document.getElementById("delete-button");
+
+    const scenarioMessages = document.getElementById("scenario-messages");
 
     const scenarioPlayers = document.getElementById("scenario-players");
 
@@ -182,6 +201,7 @@
             gaiaLayer.removeAttribute("src");
             playersLayer.removeAttribute("src");
 
+            scenarioMessages.replaceChildren();
             scenarioPlayers.replaceChildren();
 
             scenarioResult.hidden = true;
@@ -245,9 +265,15 @@
         currentScenarioId = id;
 
         scenarioFilename.textContent = data.original_filename;
+        scenarioUploadedAt.textContent = new Date(data.uploaded_at * 1000).toLocaleString();
+        scenarioFileSize.textContent = formatFileSize(data.file_size);
+        scenarioParserVersion.textContent = data.parser_version;
+        scenarioGameVersion.textContent = data.scenario.game_version;
+        scenarioVersion.textContent = data.scenario.scenario_version;
         scenarioWidth.textContent = data.scenario.width;
         scenarioHeight.textContent = data.scenario.height;
 
+        renderMessages(data.scenario.messages);
         renderPlayers(data.scenario.players);
 
         terrainLayer.src =
@@ -312,6 +338,51 @@
 
             scenarioPlayers.appendChild(playerElement);
         }
+    }
+
+    function renderMessages(messages) {
+        scenarioMessages.replaceChildren();
+
+        const fields = [
+            ["Instructions", messages.instructions],
+            ["Hints", messages.hints],
+            ["Scouts", messages.scouts],
+            ["Victory", messages.victory],
+            ["Loss", messages.loss],
+            ["History", messages.history],
+        ];
+
+        for (const [title, text] of fields) {
+            if (!text) {
+                continue;
+            }
+
+            const section = document.createElement("div");
+
+            const heading = document.createElement("h3");
+            heading.textContent = title;
+
+            const content = document.createElement("p");
+            content.className = "scenario-message";
+            content.textContent = text;
+
+            section.appendChild(heading);
+            section.appendChild(content);
+
+            scenarioMessages.appendChild(section);
+        }
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) {
+            return `${bytes} B`;
+        }
+
+        if (bytes < 1024 * 1024) {
+            return `${(bytes / 1024).toFixed(1)} KiB`;
+        }
+
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
     }
 
     loadScenarios();

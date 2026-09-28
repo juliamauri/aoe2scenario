@@ -1,5 +1,6 @@
 import json
 import sys
+import AoE2ScenarioParser
 from AoE2ScenarioParser.scenarios.aoe2_de_scenario import AoE2DEScenario
 from AoE2ScenarioParser import settings
 
@@ -54,13 +55,26 @@ for unit in scenario.unit_manager.get_all_units():
         "y": unit.y,
     })
 
+messages = {
+    "instructions": scenario.message_manager.instructions,
+    "hints": scenario.message_manager.hints,
+    "victory": scenario.message_manager.victory,
+    "loss": scenario.message_manager.loss,
+    "history": scenario.message_manager.history,
+    "scouts": scenario.message_manager.scouts,
+}
+
 result = {
+    "parser_version": AoE2ScenarioParser.__version__,
+    "scenario_version": scenario.scenario_version,
+    "game_version": scenario.game_version,
     "width": width,
     "height": height,
     "terrain": terrain,
     "elevation": elevation,
     "players": players,
     "units": units,
+    "messages": messages,
 }
 
 print(json.dumps(result))

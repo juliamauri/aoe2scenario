@@ -76,7 +76,23 @@ pub(crate) struct UnitInfo {
 }
 
 #[derive(Deserialize, Serialize)]
+pub(crate) struct ScenarioMessages {
+    pub(crate) instructions: String,
+    pub(crate) hints: String,
+    pub(crate) victory: String,
+    pub(crate) loss: String,
+    pub(crate) history: String,
+    pub(crate) scouts: String,
+}
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct ScenarioInfo {
+    #[serde(skip_serializing)]
+    pub(crate) parser_version: String,
+
+    pub(crate) scenario_version: String,
+    pub(crate) game_version: String,
+
     pub(crate) width: u32,
     pub(crate) height: u32,
 
@@ -90,6 +106,8 @@ pub(crate) struct ScenarioInfo {
 
     #[serde(skip_serializing)]
     pub(crate) units: Vec<UnitInfo>,
+
+    pub(crate) messages: ScenarioMessages,
 }
 
 pub(crate) async fn parse_scenario(path: &Path) -> Result<ScenarioInfo, ScenarioError> {
