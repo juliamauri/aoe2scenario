@@ -1,5 +1,6 @@
 import json
 import sys
+import AoE2ScenarioParser
 from AoE2ScenarioParser.scenarios.aoe2_de_scenario import AoE2DEScenario
 from AoE2ScenarioParser import settings
 
@@ -64,6 +65,7 @@ messages = {
 }
 
 result = {
+    "parser_version": AoE2ScenarioParser.__version__,
     "scenario_version": scenario.scenario_version,
     "game_version": scenario.game_version,
     "width": width,

@@ -87,6 +87,9 @@ pub(crate) struct ScenarioMessages {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct ScenarioInfo {
+    #[serde(skip_serializing)]
+    pub(crate) parser_version: String,
+
     pub(crate) scenario_version: String,
     pub(crate) game_version: String,
 

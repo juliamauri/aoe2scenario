@@ -38,6 +38,9 @@ struct ScenarioUpload {
 struct StoredScenario<'a> {
     id: uuid::Uuid,
     original_filename: &'a str,
+    uploaded_at: u64,
+    file_size: usize,
+    parser_version: &'a str,
     scenario: &'a ScenarioInfo,
 }
 
@@ -307,6 +310,21 @@ async fn upload_scenario(
 
     let players_png = encode_png(image::DynamicImage::ImageRgba8(layers.players))?;
 
+    let uploaded_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| {
+            tracing::error!(
+                error = %error,
+                "System clock is before Unix epoch"
+            );
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to store the scenario",
+            )
+        })?
+        .as_secs();
+
     let id = uuid::Uuid::new_v4();
 
     let scenario_dir = state.scenario_data_dir.join(id.to_string());
@@ -318,6 +336,9 @@ async fn upload_scenario(
     let metadata = StoredScenario {
         id,
         original_filename: &upload.file_name,
+        uploaded_at,
+        file_size: upload.bytes.len(),
+        parser_version: &scenario.parser_version,
         scenario: &scenario,
     };
     let metadata_bytes = serde_json::to_vec_pretty(&metadata).map_err(|error| {
