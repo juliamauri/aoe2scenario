@@ -3,6 +3,18 @@
 <head>
     <meta charset="utf-8">
     <title>Aoe2Scenario</title>
+    <style>
+        .scenario-thumbnail {
+            display: inline-block;
+            width: 160px;
+        }
+
+        .scenario-thumbnail img {
+            display: block;
+            width: 160px;
+            image-rendering: pixelated;
+        }
+    </style>
 </head>
 <body>
 <h1>Aoe2Scenario</h1>
@@ -79,6 +91,15 @@
         for (const scenario of scenarios) {
             const item = document.createElement("div");
 
+            const thumbnail = document.createElement("div");
+            thumbnail.className = "scenario-thumbnail";
+
+            const terrain = document.createElement("img");
+            terrain.src = `/api/scenario/${scenario.id}/minimap/terrain`;
+            terrain.alt = `${scenario.original_filename} minimap preview`;
+
+            thumbnail.appendChild(terrain);
+
             const name = document.createElement("strong");
             name.textContent = scenario.original_filename;
 
@@ -97,6 +118,7 @@
                 window.location.href = `/scenario/${scenario.id}`;
             });
 
+            item.appendChild(thumbnail);
             item.appendChild(name);
             item.appendChild(metadata);
             item.appendChild(loadButton);
