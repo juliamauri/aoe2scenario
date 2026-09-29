@@ -53,12 +53,16 @@ struct StoredScenarioMetadata {
 struct StoredScenarioListMetadata {
     id: uuid::Uuid,
     original_filename: String,
+    uploaded_at: u64,
+    file_size: usize,
 }
 
 #[derive(Serialize)]
 struct ScenarioListItem {
     id: uuid::Uuid,
     original_filename: String,
+    uploaded_at: u64,
+    file_size: usize,
 }
 
 #[derive(Clone)]
@@ -668,9 +672,12 @@ async fn list_scenarios(
         scenarios.push(ScenarioListItem {
             id,
             original_filename: metadata.original_filename,
+            uploaded_at: metadata.uploaded_at,
+            file_size: metadata.file_size,
         });
     }
 
+    scenarios.sort_by_key(|scenario| std::cmp::Reverse(scenario.uploaded_at));
     Ok(Json(scenarios))
 }
 

@@ -232,8 +232,16 @@
         for (const scenario of scenarios) {
             const item = document.createElement("div");
 
-            const name = document.createElement("span");
+            const name = document.createElement("strong");
             name.textContent = scenario.original_filename;
+
+            const metadata = document.createElement("p");
+
+            const uploadedAt =
+                new Date(scenario.uploaded_at * 1000).toLocaleString();
+
+            metadata.textContent =
+                `${uploadedAt} · ${formatFileSize(scenario.file_size)}`;
 
             const loadButton = document.createElement("button");
             loadButton.textContent = "Load";
@@ -243,6 +251,7 @@
             });
 
             item.appendChild(name);
+            item.appendChild(metadata);
             item.appendChild(loadButton);
 
             scenarioList.appendChild(item);
