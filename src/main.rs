@@ -75,6 +75,10 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
 
+async fn scenario_page() -> Html<&'static str> {
+    Html(include_str!("../web/scenario.html"))
+}
+
 async fn healthz() -> &'static str {
     "ok"
 }
@@ -696,6 +700,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/scenario/{id}", get(scenario_page))
         .route("/healthz", get(healthz))
         .route(
             "/api/scenario",

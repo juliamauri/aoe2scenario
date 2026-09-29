@@ -3,26 +3,6 @@
 <head>
     <meta charset="utf-8">
     <title>Aoe2Scenario</title>
-    <style>
-        #minimap-stack {
-            position: relative;
-            display: inline-block;
-        }
-
-        #minimap-stack img {
-            display: block;
-            image-rendering: pixelated;
-        }
-
-        #minimap-stack .minimap-overlay {
-            position: absolute;
-            inset: 0;
-        }
-
-        .scenario-message {
-            white-space: pre-wrap;
-        }
-    </style>
 </head>
 <body>
 <h1>Aoe2Scenario</h1>
@@ -34,84 +14,12 @@
 
 <p id="error-message" hidden></p>
 
-<div id="scenario-result" hidden>
-    <p>File: <span id="scenario-filename"></span></p>
-    <p>Uploaded: <span id="scenario-uploaded-at"></span></p>
-    <p>File size: <span id="scenario-file-size"></span></p>
-    <p>Parser version: <span id="scenario-parser-version"></span></p>
-    <p>Game version: <span id="scenario-game-version"></span></p>
-    <p>Scenario version: <span id="scenario-version"></span></p>
-    <p>Width: <span id="scenario-width"></span></p>
-    <p>Height: <span id="scenario-height"></span></p>
-
-    <a id="download-link">Download original scenario</a>
-    <button id="delete-button">Delete scenario</button>
-
-    <h2>Minimap</h2>
-
-    <div id="layer-controls">
-        <label>
-            <input type="checkbox" id="terrain-toggle" checked>
-            Terrain
-        </label>
-
-        <label>
-            <input type="checkbox" id="gaia-toggle" checked>
-            Gaia
-        </label>
-
-        <label>
-            <input type="checkbox" id="players-toggle" checked>
-            Players
-        </label>
-    </div>
-
-    <div id="minimap-stack">
-        <img id="terrain-layer" alt="Terrain">
-        <img id="gaia-layer" class="minimap-overlay" alt="Gaia">
-        <img id="players-layer" class="minimap-overlay" alt="Players">
-    </div>
-
-    <h2>Scenario messages</h2>
-    <div id="scenario-messages"></div>
-
-    <h2>Players</h2>
-    <div id="scenario-players"></div>
-</div>
-
 <script>
     const fileInput = document.getElementById("scenario-file");
     const uploadButton = document.getElementById("upload-button");
     const scenarioList = document.getElementById("scenario-list");
 
     const errorMessage = document.getElementById("error-message");
-    const scenarioResult = document.getElementById("scenario-result");
-
-    const scenarioFilename = document.getElementById("scenario-filename");
-    const scenarioUploadedAt = document.getElementById("scenario-uploaded-at");
-    const scenarioFileSize = document.getElementById("scenario-file-size");
-    const scenarioParserVersion = document.getElementById("scenario-parser-version");
-    const scenarioGameVersion = document.getElementById("scenario-game-version");
-    const scenarioVersion = document.getElementById("scenario-version");
-    const scenarioWidth = document.getElementById("scenario-width");
-    const scenarioHeight = document.getElementById("scenario-height");
-
-    const terrainLayer = document.getElementById("terrain-layer");
-    const gaiaLayer = document.getElementById("gaia-layer");
-    const playersLayer = document.getElementById("players-layer");
-
-    const terrainToggle = document.getElementById("terrain-toggle");
-    const gaiaToggle = document.getElementById("gaia-toggle");
-    const playersToggle = document.getElementById("players-toggle");
-
-    const downloadLink = document.getElementById("download-link");
-    const deleteButton = document.getElementById("delete-button");
-
-    const scenarioMessages = document.getElementById("scenario-messages");
-
-    const scenarioPlayers = document.getElementById("scenario-players");
-
-    let currentScenarioId = null;
 
     function scenarioFormData(file) {
         const formData = new FormData();
@@ -121,7 +29,6 @@
 
     uploadButton.addEventListener("click", async () => {
         errorMessage.hidden = true;
-        scenarioResult.hidden = true;
 
         const file = fileInput.files[0];
 
@@ -145,72 +52,12 @@
                 return;
             }
 
-            currentScenarioId = uploadData.id;
-
-            await loadScenario(uploadData.id);
-            await loadScenarios();
+            window.location.href = `/scenario/${uploadData.id}`;
         } catch (error) {
             console.error(error);
 
             errorMessage.textContent =
                 "Unable to process the scenario.";
-
-            errorMessage.hidden = false;
-        }
-    });
-
-    terrainToggle.addEventListener("change", () => {
-        terrainLayer.style.opacity =
-            terrainToggle.checked ? "1" : "0";
-    });
-
-    gaiaToggle.addEventListener("change", () => {
-        gaiaLayer.style.opacity =
-            gaiaToggle.checked ? "1" : "0";
-    });
-
-    playersToggle.addEventListener("change", () => {
-        playersLayer.style.opacity =
-            playersToggle.checked ? "1" : "0";
-    });
-
-    deleteButton.addEventListener("click", async () => {
-        if (!currentScenarioId) {
-            return;
-        }
-
-        try {
-            const response = await fetch(
-                `/api/scenario/${currentScenarioId}`,
-                {
-                    method: "DELETE"
-                }
-            );
-
-            if (!response.ok) {
-                const data = await response.json();
-
-                errorMessage.textContent = data.error;
-                errorMessage.hidden = false;
-                return;
-            }
-
-            currentScenarioId = null;
-
-            terrainLayer.removeAttribute("src");
-            gaiaLayer.removeAttribute("src");
-            playersLayer.removeAttribute("src");
-
-            scenarioMessages.replaceChildren();
-            scenarioPlayers.replaceChildren();
-
-            scenarioResult.hidden = true;
-            await loadScenarios();
-        } catch (error) {
-            console.error(error);
-
-            errorMessage.textContent =
-                "Unable to delete the scenario.";
 
             errorMessage.hidden = false;
         }
@@ -246,8 +93,8 @@
             const loadButton = document.createElement("button");
             loadButton.textContent = "Load";
 
-            loadButton.addEventListener("click", async () => {
-                await loadScenario(scenario.id);
+            loadButton.addEventListener("click", () => {
+                window.location.href = `/scenario/${scenario.id}`;
             });
 
             item.appendChild(name);
@@ -255,130 +102,6 @@
             item.appendChild(loadButton);
 
             scenarioList.appendChild(item);
-        }
-    }
-
-    async function loadScenario(id) {
-        errorMessage.hidden = true;
-
-        const response = await fetch(`/api/scenario/${id}`);
-        const data = await response.json();
-
-        if (!response.ok) {
-            errorMessage.textContent =
-                data.error ?? "Unable to load scenario.";
-            errorMessage.hidden = false;
-            return;
-        }
-
-        currentScenarioId = id;
-
-        scenarioFilename.textContent = data.original_filename;
-        scenarioUploadedAt.textContent = new Date(data.uploaded_at * 1000).toLocaleString();
-        scenarioFileSize.textContent = formatFileSize(data.file_size);
-        scenarioParserVersion.textContent = data.parser_version;
-        scenarioGameVersion.textContent = data.scenario.game_version;
-        scenarioVersion.textContent = data.scenario.scenario_version;
-        scenarioWidth.textContent = data.scenario.width;
-        scenarioHeight.textContent = data.scenario.height;
-
-        renderMessages(data.scenario.messages);
-        renderPlayers(data.scenario.players);
-
-        terrainLayer.src =
-            `/api/scenario/${id}/minimap/terrain`;
-
-        gaiaLayer.src =
-            `/api/scenario/${id}/minimap/gaia`;
-
-        playersLayer.src =
-            `/api/scenario/${id}/minimap/players`;
-
-        downloadLink.href =
-            `/api/scenario/${id}/download`;
-
-        scenarioResult.hidden = false;
-    }
-
-    function renderPlayers(players) {
-        scenarioPlayers.replaceChildren();
-
-        for (const player of players) {
-            if (!player.active) {
-                continue;
-            }
-
-            const playerElement = document.createElement("div");
-
-            const name = document.createElement("h3");
-            name.textContent =
-                `Player ${player.id} — ${player.name ?? "Unnamed"}`;
-            playerElement.appendChild(name);
-
-            const civilization = document.createElement("p");
-            civilization.textContent =
-                `Civilization: ${player.civilization}`;
-            playerElement.appendChild(civilization);
-
-            const populationCap = document.createElement("p");
-            populationCap.textContent =
-                `Population Cap: ${player.population_cap ?? "Unknown"}`;
-            playerElement.appendChild(populationCap);
-
-            const human = document.createElement("p");
-            human.textContent =
-                `Type: ${player.human ? "Human" : "AI"}`;
-            playerElement.appendChild(human);
-
-            const color = document.createElement("p");
-            color.textContent =
-                `Color: ${player.color}`;
-            playerElement.appendChild(color);
-
-            const startingAge = document.createElement("p");
-            startingAge.textContent =
-                `Starting Age: ${player.starting_age}`;
-            playerElement.appendChild(startingAge);
-
-            const resources = document.createElement("p");
-            resources.textContent =
-                `Resources: ${player.resources.food} food, ${player.resources.wood} wood, ${player.resources.gold} gold, ${player.resources.stone} stone`;
-            playerElement.appendChild(resources);
-
-            scenarioPlayers.appendChild(playerElement);
-        }
-    }
-
-    function renderMessages(messages) {
-        scenarioMessages.replaceChildren();
-
-        const fields = [
-            ["Instructions", messages.instructions],
-            ["Hints", messages.hints],
-            ["Scouts", messages.scouts],
-            ["Victory", messages.victory],
-            ["Loss", messages.loss],
-            ["History", messages.history],
-        ];
-
-        for (const [title, text] of fields) {
-            if (!text) {
-                continue;
-            }
-
-            const section = document.createElement("div");
-
-            const heading = document.createElement("h3");
-            heading.textContent = title;
-
-            const content = document.createElement("p");
-            content.className = "scenario-message";
-            content.textContent = text;
-
-            section.appendChild(heading);
-            section.appendChild(content);
-
-            scenarioMessages.appendChild(section);
         }
     }
 
