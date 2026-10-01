@@ -826,9 +826,7 @@ async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     if let Err(error) = run().await {
         tracing::error!(
@@ -848,9 +846,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let database = PgPool::connect(&database_url).await?;
 
-    sqlx::migrate!("./migrations")
-        .run(&database)
-        .await?;
+    sqlx::migrate!("./migrations").run(&database).await?;
 
     let state = AppState {
         parser_slots: Arc::new(Semaphore::new(1)),
@@ -872,10 +868,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             get(get_scenario).delete(delete_scenario),
         )
         .route("/api/scenario/{id}/download", get(download_scenario))
-        .route(
-            "/api/scenario/{id}/minimap/{layer}",
-            get(get_minimap_layer),
-        )
+        .route("/api/scenario/{id}/minimap/{layer}", get(get_minimap_layer))
         .with_state(state);
 
     let listener = TcpListener::bind("0.0.0.0:8080").await?;
