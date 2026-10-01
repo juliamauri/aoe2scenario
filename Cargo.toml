@@ -13,3 +13,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid"] }

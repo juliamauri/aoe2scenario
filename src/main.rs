@@ -10,6 +10,7 @@ use axum::{
 };
 use scenario::{ScenarioError, ScenarioInfo};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,6 +70,7 @@ struct ScenarioListItem {
 struct AppState {
     parser_slots: Arc<Semaphore>,
     scenario_data_dir: Arc<std::path::PathBuf>,
+    database: PgPool,
 }
 
 async fn index() -> Html<&'static str> {
@@ -362,6 +364,20 @@ async fn upload_scenario(
         )
     })?;
 
+    let uploaded_at = i64::try_from(uploaded_at).map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        )
+    })?;
+
+    let file_size = i64::try_from(upload.bytes.len()).map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        )
+    })?;
+
     let persist_result: Result<(), ApiError> = async {
         tokio::fs::create_dir_all(&staging_minimap_dir)
             .await
@@ -413,6 +429,65 @@ async fn upload_scenario(
         return Err(error);
     }
 
+    let database_result = sqlx::query(
+        r#"
+            INSERT INTO scenarios (
+                id,
+                original_filename,
+                uploaded_at,
+                file_size,
+                parser_version,
+                game_version,
+                scenario_version
+            )
+            VALUES (
+                $1,
+                $2,
+                TIMESTAMPTZ 'epoch' + ($3::bigint * INTERVAL '1 second'),
+                $4,
+                $5,
+                $6,
+                $7
+            )
+    "#,
+    )
+    .bind(id) // $1
+    .bind(&upload.file_name) // $2
+    .bind(uploaded_at) // $3
+    .bind(file_size) // $4
+    .bind(&scenario.parser_version) // $5
+    .bind(&scenario.game_version) // $6
+    .bind(&scenario.scenario_version) // $7
+    .execute(&state.database)
+    .await;
+
+    if let Err(error) = database_result {
+        tracing::error!(
+            error = %error,
+            scenario_id = %id,
+            "Unable to insert scenario into database"
+        );
+
+        match tokio::fs::remove_dir_all(&scenario_dir).await {
+            Ok(()) => {}
+
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {}
+
+            Err(cleanup_error) => {
+                tracing::error!(
+                    error = %cleanup_error,
+                    scenario_id = %id,
+                    "Unable to clean scenario directory after database failure"
+                );
+            }
+        }
+
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        ));
+    }
+
     Ok(Json(UploadScenarioResponse { id }))
 }
 
@@ -422,18 +497,86 @@ async fn delete_scenario(
 ) -> Result<StatusCode, ApiError> {
     let scenario_dir = state.scenario_data_dir.join(id.to_string());
 
-    match tokio::fs::remove_dir_all(&scenario_dir).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
+    let deleting_dir = state.scenario_data_dir.join(format!(".tmp-delete-{id}"));
+
+    match tokio::fs::rename(&scenario_dir, &deleting_dir).await {
+        Ok(()) => {}
 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"))
+            return Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"));
         }
 
         Err(error) => {
             tracing::error!(
                 error = %error,
                 scenario_id = %id,
-                "Unable to delete scenario"
+                "Unable to prepare scenario for deletion"
+            );
+
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ));
+        }
+    }
+
+    let database_result = sqlx::query("DELETE FROM scenarios WHERE id = $1")
+        .bind(id)
+        .execute(&state.database)
+        .await;
+
+    let database_result = match database_result {
+        Ok(result) => result,
+
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to delete scenario from database"
+            );
+
+            if let Err(rollback_error) = tokio::fs::rename(&deleting_dir, &scenario_dir).await {
+                tracing::error!(
+                    error = %rollback_error,
+                    scenario_id = %id,
+                    "Unable to restore scenario after database deletion failure"
+                );
+            }
+
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ));
+        }
+    };
+
+    if database_result.rows_affected() == 0 {
+        if let Err(rollback_error) = tokio::fs::rename(&deleting_dir, &scenario_dir).await {
+            tracing::error!(
+                error = %rollback_error,
+                scenario_id = %id,
+                "Unable to restore scenario after missing database entry"
+            );
+
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ));
+        }
+
+        return Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"));
+    }
+
+    match tokio::fs::remove_dir_all(&deleting_dir).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(StatusCode::NO_CONTENT),
+
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to remove deleted scenario files"
             );
 
             Err(error_response(
@@ -693,9 +836,16 @@ async fn main() {
 
     let scenario_data_dir =
         std::env::var("SCENARIO_DATA_DIR").unwrap_or_else(|_| "data/scenarios".to_string());
+
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let database = PgPool::connect(&database_url)
+        .await
+        .expect("Unable to connect to PostgreSQL");
+
     let state = AppState {
         parser_slots: Arc::new(Semaphore::new(1)),
         scenario_data_dir: Arc::new(scenario_data_dir.into()),
+        database,
     };
 
     let app = Router::new()
