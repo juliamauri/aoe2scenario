@@ -10,7 +10,7 @@ use axum::{
 };
 use scenario::{ScenarioError, ScenarioInfo};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,14 +48,6 @@ struct StoredScenario<'a> {
 #[derive(Deserialize)]
 struct StoredScenarioMetadata {
     original_filename: String,
-}
-
-#[derive(Deserialize)]
-struct StoredScenarioListMetadata {
-    id: uuid::Uuid,
-    original_filename: String,
-    uploaded_at: u64,
-    file_size: usize,
 }
 
 #[derive(Serialize)]
@@ -736,13 +728,36 @@ async fn get_minimap_layer(
 async fn list_scenarios(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ScenarioListItem>>, ApiError> {
-    let mut entries = tokio::fs::read_dir(state.scenario_data_dir.as_ref())
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                error = %error,
-                "Unable to read scenario directory"
-            );
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            original_filename,
+            EXTRACT(EPOCH FROM uploaded_at)::BIGINT AS uploaded_at,
+            file_size
+        FROM scenarios
+        ORDER BY uploaded_at DESC
+        "#,
+    )
+    .fetch_all(&state.database)
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            error = %error,
+            "Unable to list scenarios from database"
+        );
+
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to list scenarios",
+        )
+    })?;
+
+    let mut scenarios = Vec::new();
+
+    for row in rows {
+        let id: uuid::Uuid = row.try_get("id").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario id from database");
 
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -750,81 +765,59 @@ async fn list_scenarios(
             )
         })?;
 
-    let mut scenarios = Vec::new();
-    while let Some(entry) = entries.next_entry().await.map_err(|error| {
-        tracing::error!(
-            error = %error,
-            "Unable to read scenario directory entry"
-        );
+        let original_filename: String = row.try_get("original_filename").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario filename from database");
 
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to list scenarios",
-        )
-    })? {
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-
-        let id = match uuid::Uuid::parse_str(&file_name) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-
-        let metadata_bytes = tokio::fs::read(entry.path().join("metadata.json"))
-            .await
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    error_response(StatusCode::NOT_FOUND, "Scenario not found")
-                } else {
-                    tracing::error!(
-                        error = %error,
-                        scenario_id = %id,
-                        "Unable to read scenario metadata"
-                    );
-
-                    error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Unable to read the scenario",
-                    )
-                }
-            })?;
-
-        let metadata: StoredScenarioListMetadata = serde_json::from_slice(&metadata_bytes)
-            .map_err(|error| {
-                tracing::error!(
-                    error = %error,
-                    scenario_id = %id,
-                    "Unable to deserialize scenario metadata"
-                );
-
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Unable to list scenarios",
-                )
-            })?;
-
-        if metadata.id != id {
-            tracing::error!(
-                directory_id = %id,
-                metadata_id = %metadata.id,
-                "Scenario metadata ID does not match directory"
-            );
-
-            return Err(error_response(
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Unable to list scenarios",
-            ));
-        }
+            )
+        })?;
+
+        let uploaded_at: i64 = row.try_get("uploaded_at").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario timestamp from database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
+
+        let file_size: i64 = row.try_get("file_size").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario file size from database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
+
+        let uploaded_at = u64::try_from(uploaded_at).map_err(|error| {
+            tracing::error!(error = %error, "Invalid scenario timestamp in database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
+
+        let file_size = usize::try_from(file_size).map_err(|error| {
+            tracing::error!(error = %error, "Invalid scenario file size in database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
 
         scenarios.push(ScenarioListItem {
             id,
-            original_filename: metadata.original_filename,
-            uploaded_at: metadata.uploaded_at,
-            file_size: metadata.file_size,
+            original_filename,
+            uploaded_at,
+            file_size,
         });
     }
 
-    scenarios.sort_by_key(|scenario| std::cmp::Reverse(scenario.uploaded_at));
     Ok(Json(scenarios))
 }
 
