@@ -10,6 +10,7 @@ use axum::{
 };
 use scenario::{ScenarioError, ScenarioInfo};
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Row};
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,14 +50,6 @@ struct StoredScenarioMetadata {
     original_filename: String,
 }
 
-#[derive(Deserialize)]
-struct StoredScenarioListMetadata {
-    id: uuid::Uuid,
-    original_filename: String,
-    uploaded_at: u64,
-    file_size: usize,
-}
-
 #[derive(Serialize)]
 struct ScenarioListItem {
     id: uuid::Uuid,
@@ -69,6 +62,7 @@ struct ScenarioListItem {
 struct AppState {
     parser_slots: Arc<Semaphore>,
     scenario_data_dir: Arc<std::path::PathBuf>,
+    database: PgPool,
 }
 
 async fn index() -> Html<&'static str> {
@@ -362,6 +356,20 @@ async fn upload_scenario(
         )
     })?;
 
+    let uploaded_at = i64::try_from(uploaded_at).map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        )
+    })?;
+
+    let file_size = i64::try_from(upload.bytes.len()).map_err(|_| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        )
+    })?;
+
     let persist_result: Result<(), ApiError> = async {
         tokio::fs::create_dir_all(&staging_minimap_dir)
             .await
@@ -413,6 +421,65 @@ async fn upload_scenario(
         return Err(error);
     }
 
+    let database_result = sqlx::query(
+        r#"
+            INSERT INTO scenarios (
+                id,
+                original_filename,
+                uploaded_at,
+                file_size,
+                parser_version,
+                game_version,
+                scenario_version
+            )
+            VALUES (
+                $1,
+                $2,
+                TIMESTAMPTZ 'epoch' + ($3::bigint * INTERVAL '1 second'),
+                $4,
+                $5,
+                $6,
+                $7
+            )
+    "#,
+    )
+    .bind(id) // $1
+    .bind(&upload.file_name) // $2
+    .bind(uploaded_at) // $3
+    .bind(file_size) // $4
+    .bind(&scenario.parser_version) // $5
+    .bind(&scenario.game_version) // $6
+    .bind(&scenario.scenario_version) // $7
+    .execute(&state.database)
+    .await;
+
+    if let Err(error) = database_result {
+        tracing::error!(
+            error = %error,
+            scenario_id = %id,
+            "Unable to insert scenario into database"
+        );
+
+        match tokio::fs::remove_dir_all(&scenario_dir).await {
+            Ok(()) => {}
+
+            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {}
+
+            Err(cleanup_error) => {
+                tracing::error!(
+                    error = %cleanup_error,
+                    scenario_id = %id,
+                    "Unable to clean scenario directory after database failure"
+                );
+            }
+        }
+
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to store the scenario",
+        ));
+    }
+
     Ok(Json(UploadScenarioResponse { id }))
 }
 
@@ -422,18 +489,86 @@ async fn delete_scenario(
 ) -> Result<StatusCode, ApiError> {
     let scenario_dir = state.scenario_data_dir.join(id.to_string());
 
-    match tokio::fs::remove_dir_all(&scenario_dir).await {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
+    let deleting_dir = state.scenario_data_dir.join(format!(".tmp-delete-{id}"));
+
+    match tokio::fs::rename(&scenario_dir, &deleting_dir).await {
+        Ok(()) => {}
 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"))
+            return Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"));
         }
 
         Err(error) => {
             tracing::error!(
                 error = %error,
                 scenario_id = %id,
-                "Unable to delete scenario"
+                "Unable to prepare scenario for deletion"
+            );
+
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ));
+        }
+    }
+
+    let database_result = sqlx::query("DELETE FROM scenarios WHERE id = $1")
+        .bind(id)
+        .execute(&state.database)
+        .await;
+
+    let database_result = match database_result {
+        Ok(result) => result,
+
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to delete scenario from database"
+            );
+
+            if let Err(rollback_error) = tokio::fs::rename(&deleting_dir, &scenario_dir).await {
+                tracing::error!(
+                    error = %rollback_error,
+                    scenario_id = %id,
+                    "Unable to restore scenario after database deletion failure"
+                );
+            }
+
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ));
+        }
+    };
+
+    if database_result.rows_affected() == 0 {
+        if let Err(rollback_error) = tokio::fs::rename(&deleting_dir, &scenario_dir).await {
+            tracing::error!(
+                error = %rollback_error,
+                scenario_id = %id,
+                "Unable to restore scenario after missing database entry"
+            );
+
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to delete the scenario",
+            ));
+        }
+
+        return Err(error_response(StatusCode::NOT_FOUND, "Scenario not found"));
+    }
+
+    match tokio::fs::remove_dir_all(&deleting_dir).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(StatusCode::NO_CONTENT),
+
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                scenario_id = %id,
+                "Unable to remove deleted scenario files"
             );
 
             Err(error_response(
@@ -593,13 +728,36 @@ async fn get_minimap_layer(
 async fn list_scenarios(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ScenarioListItem>>, ApiError> {
-    let mut entries = tokio::fs::read_dir(state.scenario_data_dir.as_ref())
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                error = %error,
-                "Unable to read scenario directory"
-            );
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            original_filename,
+            EXTRACT(EPOCH FROM uploaded_at)::BIGINT AS uploaded_at,
+            file_size
+        FROM scenarios
+        ORDER BY uploaded_at DESC
+        "#,
+    )
+    .fetch_all(&state.database)
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            error = %error,
+            "Unable to list scenarios from database"
+        );
+
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unable to list scenarios",
+        )
+    })?;
+
+    let mut scenarios = Vec::new();
+
+    for row in rows {
+        let id: uuid::Uuid = row.try_get("id").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario id from database");
 
             error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -607,81 +765,59 @@ async fn list_scenarios(
             )
         })?;
 
-    let mut scenarios = Vec::new();
-    while let Some(entry) = entries.next_entry().await.map_err(|error| {
-        tracing::error!(
-            error = %error,
-            "Unable to read scenario directory entry"
-        );
+        let original_filename: String = row.try_get("original_filename").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario filename from database");
 
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to list scenarios",
-        )
-    })? {
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-
-        let id = match uuid::Uuid::parse_str(&file_name) {
-            Ok(id) => id,
-            Err(_) => continue,
-        };
-
-        let metadata_bytes = tokio::fs::read(entry.path().join("metadata.json"))
-            .await
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    error_response(StatusCode::NOT_FOUND, "Scenario not found")
-                } else {
-                    tracing::error!(
-                        error = %error,
-                        scenario_id = %id,
-                        "Unable to read scenario metadata"
-                    );
-
-                    error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Unable to read the scenario",
-                    )
-                }
-            })?;
-
-        let metadata: StoredScenarioListMetadata = serde_json::from_slice(&metadata_bytes)
-            .map_err(|error| {
-                tracing::error!(
-                    error = %error,
-                    scenario_id = %id,
-                    "Unable to deserialize scenario metadata"
-                );
-
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Unable to list scenarios",
-                )
-            })?;
-
-        if metadata.id != id {
-            tracing::error!(
-                directory_id = %id,
-                metadata_id = %metadata.id,
-                "Scenario metadata ID does not match directory"
-            );
-
-            return Err(error_response(
+            error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Unable to list scenarios",
-            ));
-        }
+            )
+        })?;
+
+        let uploaded_at: i64 = row.try_get("uploaded_at").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario timestamp from database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
+
+        let file_size: i64 = row.try_get("file_size").map_err(|error| {
+            tracing::error!(error = %error, "Unable to read scenario file size from database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
+
+        let uploaded_at = u64::try_from(uploaded_at).map_err(|error| {
+            tracing::error!(error = %error, "Invalid scenario timestamp in database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
+
+        let file_size = usize::try_from(file_size).map_err(|error| {
+            tracing::error!(error = %error, "Invalid scenario file size in database");
+
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Unable to list scenarios",
+            )
+        })?;
 
         scenarios.push(ScenarioListItem {
             id,
-            original_filename: metadata.original_filename,
-            uploaded_at: metadata.uploaded_at,
-            file_size: metadata.file_size,
+            original_filename,
+            uploaded_at,
+            file_size,
         });
     }
 
-    scenarios.sort_by_key(|scenario| std::cmp::Reverse(scenario.uploaded_at));
     Ok(Json(scenarios))
 }
 
@@ -689,13 +825,33 @@ async fn list_scenarios(
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    if let Err(error) = run().await {
+        tracing::error!(
+            error = %error,
+            "Server startup failed"
+        );
+
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let scenario_data_dir =
         std::env::var("SCENARIO_DATA_DIR").unwrap_or_else(|_| "data/scenarios".to_string());
+
+    let database_url = std::env::var("DATABASE_URL")?;
+
+    let database = PgPool::connect(&database_url).await?;
+
+    sqlx::migrate!("./migrations").run(&database).await?;
+
     let state = AppState {
         parser_slots: Arc::new(Semaphore::new(1)),
         scenario_data_dir: Arc::new(scenario_data_dir.into()),
+        database,
     };
 
     let app = Router::new()
@@ -714,7 +870,10 @@ async fn main() {
         .route("/api/scenario/{id}/download", get(download_scenario))
         .route("/api/scenario/{id}/minimap/{layer}", get(get_minimap_layer))
         .with_state(state);
-    let listener = TcpListener::bind("0.0.0.0:8080").await.unwrap();
 
-    axum::serve(listener, app).await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:8080").await?;
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
